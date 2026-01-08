@@ -40,7 +40,6 @@ struct WellDataApp {
     selected_start_year: Option<i32>,
     selected_wells: HashSet<String>,
 
-    // --- НОВОЕ ПОЛЕ: Строка поиска ---
     search_query: String,
 
     status_message: String,
@@ -60,7 +59,6 @@ impl Default for WellDataApp {
             source_file_path: None,
             selected_start_year: None,
             selected_wells: HashSet::new(),
-            // --- Инициализация поиска пустой строкой ---
             search_query: String::new(),
             status_message: "Файл не выбран".to_string(),
             is_loading: false,
@@ -381,13 +379,13 @@ impl eframe::App for WellDataApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Обработка данных скважин");
-            ui.add_space(10.0);
+            ui.add_space(5.0);
 
             ui.set_enabled(!self.is_loading);
 
             // 1. Файл
             ui.horizontal(|ui| {
-                if ui.button("1. Выбрать файл").clicked() {
+                if ui.button("📂 Открыть файл").clicked() {
                     self.load_file();
                 }
                 ui.label(self.source_file_path.as_deref().unwrap_or("..."));
@@ -395,7 +393,7 @@ impl eframe::App for WellDataApp {
 
             // 2. Год
             ui.horizontal(|ui| {
-                ui.label("2. Год начала:");
+                ui.label("📅 Год начала:");
                 let txt = self
                     .selected_start_year
                     .map(|y| y.to_string())
@@ -415,100 +413,135 @@ impl eframe::App for WellDataApp {
 
             ui.separator();
 
-            // 3. Скважины с ПОИСКОМ
-            ui.label("3. Скважины:");
+            // =========================================================
+            //               ДВУХКОЛОНОЧНЫЙ ИНТЕРФЕЙС
+            // =========================================================
 
-            // --- СТРОКА ПОИСКА ---
-            ui.horizontal(|ui| {
-                ui.label("🔍");
-                // Поле ввода обновляет переменную self.search_query
-                ui.text_edit_singleline(&mut self.search_query);
+            // Задаем 2 колонки
+            ui.columns(2, |columns| {
+                // --- ЛЕВАЯ КОЛОНКА: ПОИСК И ВЫБОР ---
+                columns[0].vertical(|ui| {
+                    ui.heading("🔍 Поиск");
 
-                // Кнопка очистки поиска
-                if !self.search_query.is_empty() && ui.button("✖").clicked() {
-                    self.search_query.clear();
-                }
-            });
+                    // Строка поиска
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut self.search_query);
+                        if !self.search_query.is_empty() && ui.button("✖").clicked() {
+                            self.search_query.clear();
+                        }
+                    });
 
-            // Формируем список ВИДИМЫХ скважин (фильтрация)
-            // Мы приводим все к нижнему регистру для поиска
-            let filtered_wells: Vec<&String> = self
-                .unique_wells
-                .iter()
-                .filter(|w| w.to_lowercase().contains(&self.search_query.to_lowercase()))
-                .collect();
+                    // Фильтрация
+                    let filtered_wells: Vec<&String> = self
+                        .unique_wells
+                        .iter()
+                        .filter(|w| w.to_lowercase().contains(&self.search_query.to_lowercase()))
+                        .collect();
 
-            // Кнопки управления ВЫБРАННЫМИ скважинами
-            ui.horizontal(|ui| {
-                // Выбрать только ТЕ, что сейчас видны в списке
-                if ui.button("Выбрать видимые").clicked() {
-                    for well in &filtered_wells {
-                        self.selected_wells.insert((*well).clone());
-                    }
-                }
-                // Сбросить вообще все (даже скрытые)
-                if ui.button("Сброс всех").clicked() {
-                    self.selected_wells.clear();
-                }
-
-                // Отображение счетчика
-                ui.label(format!("Выбрано: {}", self.selected_wells.len()));
-            });
-
-            egui::ScrollArea::vertical()
-                .max_height(200.0)
-                .show(ui, |ui| {
-                    // Если поиск ничего не дал
-                    if filtered_wells.is_empty() && !self.unique_wells.is_empty() {
-                        ui.label("Ничего не найдено");
-                    }
-
-                    // Рисуем чекбоксы только для отфильтрованных
-                    for well in filtered_wells {
-                        let mut is_sel = self.selected_wells.contains(well);
-                        if ui.checkbox(&mut is_sel, well).changed() {
-                            if is_sel {
-                                self.selected_wells.insert(well.clone());
-                            } else {
-                                self.selected_wells.remove(well);
-                            }
+                    if ui.button("Выбрать видимые").clicked() {
+                        for well in &filtered_wells {
+                            self.selected_wells.insert((*well).clone());
                         }
                     }
+
+                    ui.add_space(5.0);
+
+                    // Список (левый)
+                    ui.push_id("left_list", |ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(300.0)
+                            .show(ui, |ui| {
+                                if filtered_wells.is_empty() && !self.unique_wells.is_empty() {
+                                    ui.label("Нет совпадений");
+                                }
+                                for well in filtered_wells {
+                                    let mut is_sel = self.selected_wells.contains(well);
+                                    if ui.checkbox(&mut is_sel, well).changed() {
+                                        if is_sel {
+                                            self.selected_wells.insert(well.clone());
+                                        } else {
+                                            self.selected_wells.remove(well);
+                                        }
+                                    }
+                                }
+                            });
+                    });
                 });
 
+                // --- ПРАВАЯ КОЛОНКА: ВЫБРАННЫЕ ---
+                columns[1].vertical(|ui| {
+                    ui.heading(format!("✅ Выбрано: {}", self.selected_wells.len()));
+
+                    if ui.button("🗑 Сбросить всё").clicked() {
+                        self.selected_wells.clear();
+                    }
+
+                    ui.add_space(5.0);
+
+                    // Сортируем выбранные, чтобы список не прыгал
+                    let mut sorted_selected: Vec<String> =
+                        self.selected_wells.iter().cloned().collect();
+                    sorted_selected.sort();
+
+                    // Список (правый)
+                    ui.push_id("right_list", |ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(300.0)
+                            .show(ui, |ui| {
+                                if sorted_selected.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new("Список пуст")
+                                            .color(egui::Color32::GRAY),
+                                    );
+                                }
+
+                                // Отображаем список выбранных с кнопкой удаления
+                                for well in sorted_selected {
+                                    ui.horizontal(|ui| {
+                                        if ui.button("✖").clicked() {
+                                            self.selected_wells.remove(&well);
+                                        }
+                                        ui.label(&well);
+                                    });
+                                }
+                            });
+                    });
+                });
+            });
+
             ui.add_space(10.0);
+            ui.separator();
 
             // 4. Кнопка
             let ready = !self.raw_data.is_empty()
                 && self.selected_start_year.is_some()
                 && !self.selected_wells.is_empty();
             if ui
-                .add_enabled(ready, egui::Button::new("4. Сформировать отчет"))
+                .add_enabled(
+                    ready,
+                    egui::Button::new("🚀 Сформировать отчет").min_size(egui::vec2(0.0, 30.0)),
+                )
                 .clicked()
             {
                 self.process_data();
             }
 
-            ui.add_space(15.0);
-            ui.separator();
+            ui.add_space(10.0);
 
             // --- БЛОК ПРОГРЕССА ---
             ui.set_enabled(true);
 
             if self.is_loading {
                 ui.label(egui::RichText::new(&self.status_message).strong());
-
                 ui.add_space(5.0);
-                ui.label("Общий прогресс (Листы / Скважины):");
+                ui.label("Общий прогресс:");
                 ui.add(egui::ProgressBar::new(self.progress_global).animate(true));
 
                 ui.add_space(5.0);
-                ui.label("Текущий прогресс:");
-
                 if self.progress_local < 0.01 {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label("Загрузка данных в память (это может занять время)...");
+                        ui.label("Обработка данных...");
                     });
                 } else {
                     ui.add(egui::ProgressBar::new(self.progress_local).animate(true));
@@ -524,7 +557,8 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Well Data App",
         eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default().with_inner_size([500.0, 600.0]),
+            // Увеличили ширину, чтобы влезли 2 колонки
+            viewport: egui::ViewportBuilder::default().with_inner_size([700.0, 650.0]),
             ..Default::default()
         },
         Box::new(|cc| Ok(Box::new(WellDataApp::new(cc)))),
