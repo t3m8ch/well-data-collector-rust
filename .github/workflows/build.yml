@@ -1,0 +1,49 @@
+name: Build Windows Release
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  # Позволяет запускать сборку вручную через кнопку на сайте
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # 1. Кэширование зависимостей (ускоряет повторные сборки в 10 раз)
+      - name: Cache Cargo registry and build
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # 2. Сборка проекта в Release режиме
+      - name: Build Release
+        run: cargo build --release --verbose
+
+      # 3. (Опционально) Переименование файла для удобства
+      - name: Rename Executable
+        run: |
+          cd target/release
+          mv well_data_app.exe WellDataProcessor.exe
+
+      # 4. Загрузка артефакта (exe файла), чтобы его можно было скачать
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WellDataProcessor-Windows
+          path: target/release/WellDataProcessor.exe
+          if-no-files-found: error
