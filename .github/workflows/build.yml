@@ -38,6 +38,10 @@ jobs:
       - name: Rename Executable
         run: |
           cd target/release
+          # Если файл уже существует, удаляем его, чтобы избежать ошибки
+          if (Test-Path WellDataProcessor.exe) { Remove-Item WellDataProcessor.exe }
+
+          # Теперь переименовываем
           mv well-data-collector-rust.exe WellDataProcessor.exe
 
       # 4. Загрузка артефакта (exe файла), чтобы его можно было скачать
