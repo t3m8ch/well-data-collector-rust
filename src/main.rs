@@ -25,10 +25,10 @@ struct WellRecord {
 
 // Типы сообщений от воркера к UI
 enum LoaderMessage {
-    Progress(f32, String), // Прогресс (0.0 - 1.0) и текст
-    Loaded((Vec<WellRecord>, Vec<i32>, Vec<String>)), // Финал загрузки
-    Saved(String),         // Финал сохранения
-    Error(String),         // Ошибка
+    Progress(f32, f32, String),
+    Loaded((Vec<WellRecord>, Vec<i32>, Vec<String>)),
+    Saved(String),
+    Error(String),
 }
 
 struct WellDataApp {
@@ -40,9 +40,13 @@ struct WellDataApp {
     selected_start_year: Option<i32>,
     selected_wells: HashSet<String>,
 
+    // --- НОВОЕ ПОЛЕ: Строка поиска ---
+    search_query: String,
+
     status_message: String,
     is_loading: bool,
-    current_progress: f32, // Текущий прогресс для UI
+    progress_global: f32,
+    progress_local: f32,
 
     rx: Option<Receiver<LoaderMessage>>,
 }
@@ -56,9 +60,12 @@ impl Default for WellDataApp {
             source_file_path: None,
             selected_start_year: None,
             selected_wells: HashSet::new(),
+            // --- Инициализация поиска пустой строкой ---
+            search_query: String::new(),
             status_message: "Файл не выбран".to_string(),
             is_loading: false,
-            current_progress: 0.0,
+            progress_global: 0.0,
+            progress_local: 0.0,
             rx: None,
         }
     }
@@ -81,7 +88,6 @@ impl WellDataApp {
             return;
         }
 
-        // Валидация ввода
         let start_year = match self.selected_start_year {
             Some(y) => y,
             None => {
@@ -95,7 +101,6 @@ impl WellDataApp {
         }
 
         if let Some(path) = FileDialog::new().add_filter("Excel", &["xlsx"]).save_file() {
-            // Клонируем данные для потока
             let data = self.raw_data.clone();
             let wells = self.selected_wells.clone();
 
@@ -103,7 +108,6 @@ impl WellDataApp {
         }
     }
 
-    // Универсальный метод запуска фоновой задачи
     fn start_worker<F>(&mut self, task: F)
     where
         F: FnOnce(Sender<LoaderMessage>) -> Result<LoaderMessage, Box<dyn Error + Send + Sync>>
@@ -111,38 +115,34 @@ impl WellDataApp {
             + 'static,
     {
         self.is_loading = true;
-        self.current_progress = 0.0;
+        self.progress_global = 0.0;
+        self.progress_local = 0.0;
         self.status_message = "Запуск...".to_string();
 
         let (tx, rx) = channel();
         self.rx = Some(rx);
-
-        // Клонируем tx для передачи внутрь замыкания, чтобы оно могло слать прогресс
         let tx_for_thread = tx.clone();
 
-        thread::spawn(move || {
-            // task сам должен отправить финальное сообщение (Loaded или Saved),
-            // либо мы ловим ошибку и шлем Error
-            match task(tx_for_thread.clone()) {
-                Ok(msg) => {
-                    let _ = tx_for_thread.send(msg);
-                }
-                Err(e) => {
-                    let _ = tx_for_thread.send(LoaderMessage::Error(e.to_string()));
-                }
+        thread::spawn(move || match task(tx_for_thread.clone()) {
+            Ok(msg) => {
+                let _ = tx_for_thread.send(msg);
+            }
+            Err(e) => {
+                let _ = tx_for_thread.send(LoaderMessage::Error(e.to_string()));
             }
         });
     }
 }
 
-// --- ФУНКЦИИ РАБОТЫ С ДАННЫМИ (ТЕПЕРЬ С REPORTING) ---
+// --- ФУНКЦИИ РАБОТЫ С ДАННЫМИ ---
 
 fn read_excel_file(
     path: &PathBuf,
     tx: Sender<LoaderMessage>,
 ) -> Result<LoaderMessage, Box<dyn Error + Send + Sync>> {
     let _ = tx.send(LoaderMessage::Progress(
-        0.05,
+        0.0,
+        0.0,
         "Открытие файла...".to_string(),
     ));
 
@@ -154,18 +154,20 @@ fn read_excel_file(
     let mut valid_years = BTreeSet::new();
     let mut unique_wells = BTreeSet::new();
 
-    for (idx, sheet_name) in sheets.iter().enumerate() {
-        // Считаем прогресс (от 0.1 до 0.9)
-        let progress = 0.1 + (0.8 * (idx as f32 / total_sheets as f32));
+    for (sheet_idx, sheet_name) in sheets.iter().enumerate() {
+        let global_prog = sheet_idx as f32 / total_sheets as f32;
+
         let _ = tx.send(LoaderMessage::Progress(
-            progress,
-            format!("Чтение листа: {}", sheet_name),
+            global_prog,
+            0.0,
+            format!("Лист '{}': чтение и парсинг (ждите)...", sheet_name),
         ));
 
         if let Ok(year) = sheet_name.parse::<i32>() {
             if let Ok(range) = workbook.worksheet_range(sheet_name) {
-                let mut headers = range.rows().next().ok_or("Пустой лист")?.iter();
+                let total_rows_in_sheet = range.height();
 
+                let mut headers = range.rows().next().ok_or("Пустой лист")?.iter();
                 let mut col_map = std::collections::HashMap::new();
                 for (i, cell) in headers.enumerate() {
                     if let Some(s) = cell.get_string() {
@@ -179,7 +181,16 @@ fn read_excel_file(
                     let idx_oil = col_map.get("PdOil").copied();
                     let idx_temp = col_map.get(TEMPERATURE_COL).copied();
 
-                    for row in range.rows().skip(1) {
+                    for (i, row) in range.rows().skip(1).enumerate() {
+                        if i % 5000 == 0 {
+                            let local_prog = i as f32 / total_rows_in_sheet as f32;
+                            let _ = tx.send(LoaderMessage::Progress(
+                                global_prog,
+                                local_prog,
+                                format!("Лист '{}': обработка строк...", sheet_name),
+                            ));
+                        }
+
                         let well_name = match row.get(idx_n) {
                             Some(Data::String(s)) => s.clone(),
                             Some(Data::Float(f)) => f.to_string(),
@@ -187,7 +198,6 @@ fn read_excel_file(
                             _ => continue,
                         };
 
-                        // Парсим дату
                         let date = match row.get(idx_d) {
                             Some(d) => d.as_datetime(),
                             None => None,
@@ -212,7 +222,11 @@ fn read_excel_file(
         }
     }
 
-    let _ = tx.send(LoaderMessage::Progress(1.0, "Завершение...".to_string()));
+    let _ = tx.send(LoaderMessage::Progress(
+        1.0,
+        1.0,
+        "Финализация...".to_string(),
+    ));
     Ok(LoaderMessage::Loaded((
         all_records,
         valid_years.into_iter().collect(),
@@ -229,7 +243,8 @@ fn save_excel_file(
 ) -> Result<LoaderMessage, Box<dyn Error + Send + Sync>> {
     let _ = tx.send(LoaderMessage::Progress(
         0.0,
-        "Фильтрация данных...".to_string(),
+        0.0,
+        "Подготовка данных...".to_string(),
     ));
 
     let mut filtered_data: Vec<&WellRecord> = data
@@ -237,24 +252,23 @@ fn save_excel_file(
         .filter(|r| r.year_sheet >= start_year && selected_wells.contains(&r.well_name))
         .collect();
 
-    let _ = tx.send(LoaderMessage::Progress(0.1, "Сортировка...".to_string()));
     filtered_data.sort_by(|a, b| a.well_name.cmp(&b.well_name).then(a.date.cmp(&b.date)));
 
     let mut workbook = Workbook::new();
     let wells_to_export: Vec<&String> = filtered_data
         .iter()
         .map(|r| &r.well_name)
-        .collect::<BTreeSet<_>>() // Unique + Sorted
+        .collect::<BTreeSet<_>>()
         .into_iter()
         .collect();
 
     let total_wells = wells_to_export.len();
 
-    for (i, well_name) in wells_to_export.iter().enumerate() {
-        // Отчет о прогрессе
-        let progress = 0.2 + (0.8 * (i as f32 / total_wells as f32));
+    for (idx, well_name) in wells_to_export.iter().enumerate() {
+        let global_prog = idx as f32 / total_wells as f32;
         let _ = tx.send(LoaderMessage::Progress(
-            progress,
+            global_prog,
+            0.0,
             format!("Запись скважины: {}", well_name),
         ));
 
@@ -273,8 +287,24 @@ fn save_excel_file(
         worksheet.write_string(0, 3, "PdOil")?;
         worksheet.write_string(0, 4, TEMPERATURE_COL)?;
 
+        let records_for_well: Vec<&&WellRecord> = filtered_data
+            .iter()
+            .filter(|r| &r.well_name == *well_name)
+            .collect();
+
+        let total_rows = records_for_well.len();
+
         let mut row_idx = 1;
-        for record in filtered_data.iter().filter(|r| &r.well_name == *well_name) {
+        for (i, record) in records_for_well.iter().enumerate() {
+            if i % 500 == 0 {
+                let local_prog = i as f32 / total_rows as f32;
+                let _ = tx.send(LoaderMessage::Progress(
+                    global_prog,
+                    local_prog,
+                    format!("Скважина {}: строка {}/{}", well_name, i, total_rows),
+                ));
+            }
+
             worksheet.write_string(row_idx, 0, &record.well_name)?;
             if let Some(d) = record.date {
                 worksheet.write_string(row_idx, 1, d.format("%Y-%m-%d %H:%M:%S").to_string())?;
@@ -294,6 +324,7 @@ fn save_excel_file(
 
     let _ = tx.send(LoaderMessage::Progress(
         1.0,
+        1.0,
         "Сохранение файла на диск...".to_string(),
     ));
     workbook.save(path)?;
@@ -304,16 +335,14 @@ fn save_excel_file(
 
 impl eframe::App for WellDataApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Флаг, который скажет нам, нужно ли закрывать канал после обработки сообщений
         let mut should_close_channel = false;
 
-        // Обработка сообщений
         if let Some(rx) = &self.rx {
-            // Читаем все доступные сообщения без блокировки
             while let Ok(msg) = rx.try_recv() {
                 match msg {
-                    LoaderMessage::Progress(val, text) => {
-                        self.current_progress = val;
+                    LoaderMessage::Progress(global, local, text) => {
+                        self.progress_global = global;
+                        self.progress_local = local;
                         self.status_message = text;
                     }
                     LoaderMessage::Loaded((data, years, wells)) => {
@@ -326,28 +355,26 @@ impl eframe::App for WellDataApp {
                         self.status_message =
                             format!("Готово. Загружено: {} записей", self.raw_data.len());
                         self.is_loading = false;
-                        should_close_channel = true; // Помечаем на удаление
+                        should_close_channel = true;
                     }
                     LoaderMessage::Saved(path) => {
                         self.status_message = format!("Успех! Файл сохранен: {}", path);
                         self.is_loading = false;
-                        should_close_channel = true; // Помечаем на удаление
+                        should_close_channel = true;
                     }
                     LoaderMessage::Error(e) => {
                         self.status_message = format!("ОШИБКА: {}", e);
                         self.is_loading = false;
-                        should_close_channel = true; // Помечаем на удаление
+                        should_close_channel = true;
                     }
                 }
             }
-        } // <--- Здесь ссылка `rx` умирает, и мы снова можем менять `self.rx`
+        }
 
-        // Теперь безопасно удаляем канал, если нужно
         if should_close_channel {
             self.rx = None;
         }
 
-        // Если мы ждем сообщений, обновляем UI постоянно для плавности полоски
         if self.is_loading {
             ctx.request_repaint();
         }
@@ -356,7 +383,6 @@ impl eframe::App for WellDataApp {
             ui.heading("Обработка данных скважин");
             ui.add_space(10.0);
 
-            // Если идет загрузка - блокируем взаимодействие
             ui.set_enabled(!self.is_loading);
 
             // 1. Файл
@@ -387,20 +413,58 @@ impl eframe::App for WellDataApp {
                     });
             });
 
-            // 3. Скважины
+            ui.separator();
+
+            // 3. Скважины с ПОИСКОМ
             ui.label("3. Скважины:");
+
+            // --- СТРОКА ПОИСКА ---
+            ui.horizontal(|ui| {
+                ui.label("🔍");
+                // Поле ввода обновляет переменную self.search_query
+                ui.text_edit_singleline(&mut self.search_query);
+
+                // Кнопка очистки поиска
+                if !self.search_query.is_empty() && ui.button("✖").clicked() {
+                    self.search_query.clear();
+                }
+            });
+
+            // Формируем список ВИДИМЫХ скважин (фильтрация)
+            // Мы приводим все к нижнему регистру для поиска
+            let filtered_wells: Vec<&String> = self
+                .unique_wells
+                .iter()
+                .filter(|w| w.to_lowercase().contains(&self.search_query.to_lowercase()))
+                .collect();
+
+            // Кнопки управления ВЫБРАННЫМИ скважинами
+            ui.horizontal(|ui| {
+                // Выбрать только ТЕ, что сейчас видны в списке
+                if ui.button("Выбрать видимые").clicked() {
+                    for well in &filtered_wells {
+                        self.selected_wells.insert((*well).clone());
+                    }
+                }
+                // Сбросить вообще все (даже скрытые)
+                if ui.button("Сброс всех").clicked() {
+                    self.selected_wells.clear();
+                }
+
+                // Отображение счетчика
+                ui.label(format!("Выбрано: {}", self.selected_wells.len()));
+            });
+
             egui::ScrollArea::vertical()
-                .max_height(150.0)
+                .max_height(200.0)
                 .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        if ui.button("Все").clicked() {
-                            self.selected_wells = self.unique_wells.iter().cloned().collect();
-                        }
-                        if ui.button("Сброс").clicked() {
-                            self.selected_wells.clear();
-                        }
-                    });
-                    for well in &self.unique_wells {
+                    // Если поиск ничего не дал
+                    if filtered_wells.is_empty() && !self.unique_wells.is_empty() {
+                        ui.label("Ничего не найдено");
+                    }
+
+                    // Рисуем чекбоксы только для отфильтрованных
+                    for well in filtered_wells {
                         let mut is_sel = self.selected_wells.contains(well);
                         if ui.checkbox(&mut is_sel, well).changed() {
                             if is_sel {
@@ -414,7 +478,7 @@ impl eframe::App for WellDataApp {
 
             ui.add_space(10.0);
 
-            // 4. Кнопка запуска
+            // 4. Кнопка
             let ready = !self.raw_data.is_empty()
                 && self.selected_start_year.is_some()
                 && !self.selected_wells.is_empty();
@@ -432,8 +496,23 @@ impl eframe::App for WellDataApp {
             ui.set_enabled(true);
 
             if self.is_loading {
-                ui.label(&self.status_message);
-                ui.add(egui::ProgressBar::new(self.current_progress).animate(true));
+                ui.label(egui::RichText::new(&self.status_message).strong());
+
+                ui.add_space(5.0);
+                ui.label("Общий прогресс (Листы / Скважины):");
+                ui.add(egui::ProgressBar::new(self.progress_global).animate(true));
+
+                ui.add_space(5.0);
+                ui.label("Текущий прогресс:");
+
+                if self.progress_local < 0.01 {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Загрузка данных в память (это может занять время)...");
+                    });
+                } else {
+                    ui.add(egui::ProgressBar::new(self.progress_local).animate(true));
+                }
             } else {
                 ui.label(egui::RichText::new(&self.status_message).color(egui::Color32::GRAY));
             }
@@ -445,7 +524,7 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Well Data App",
         eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default().with_inner_size([500.0, 500.0]),
+            viewport: egui::ViewportBuilder::default().with_inner_size([500.0, 600.0]),
             ..Default::default()
         },
         Box::new(|cc| Ok(Box::new(WellDataApp::new(cc)))),
