@@ -2,9 +2,9 @@ name: Build Windows Release
 
 on:
   push:
-    branches: ["main"]
+    branches: ["master"]
   pull_request:
-    branches: ["main"]
+    branches: ["master"]
   # Позволяет запускать сборку вручную через кнопку на сайте
   workflow_dispatch:
 
