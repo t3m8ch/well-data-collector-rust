@@ -38,7 +38,7 @@ jobs:
       - name: Rename Executable
         run: |
           cd target/release
-          mv well_data_app.exe WellDataProcessor.exe
+          mv well-data-collector-rust.exe WellDataProcessor.exe
 
       # 4. Загрузка артефакта (exe файла), чтобы его можно было скачать
       - name: Upload Artifact
